@@ -28,6 +28,26 @@ Built in pure Rust using native Darwin kernel primitives (`kqueue` and `notify(3
 
 ---
 
+## Thermal & Performance Impact
+
+On an M4 MacBook Air, testing under sustained 10-thread full CPU load illustrates how Low Power Mode significantly reduces thermal accumulation:
+
+| Metric | Full Performance (Nominal) | Low Power Mode (Governor Active) | Difference |
+| :--- | :--- | :--- | :--- |
+| **Peak Core Temp** | **78°C** | **50°C** | **-28°C** |
+| **Average Core Temp** | **~67°C – 74°C** | **~45°C – 49°C** | **~-22°C to -25°C** |
+| **Compute Throughput** | 1,024 H/s (60 FPS) | 432 H/s (28 FPS) | Power capped |
+
+#### Full Performance State (Sustained Load)
+Package rapidly heats up into the high 70s°C across all performance and efficiency cores:
+![Full Performance Under Load](assets/benchmark-nominal.png)
+
+#### Low Power Mode State (Capped Draw)
+Temperatures drop by over **25°C**, keeping core temperatures around ~46°C–50°C and preventing chassis thermal saturation:
+![Low Power Mode Under Load](assets/benchmark-lowpower.png)
+
+---
+
 ## System Requirements
 
 * Apple Silicon Mac (M1 or later)
