@@ -96,16 +96,64 @@ extern "C" fn handle_signal(_: c_int) {
     // Registering a trivial handler prevents Darwin's default SIG_DFL termination.
 }
 
-fn set_low_power_mode(enable: bool) {
-    let val = if enable { "1" } else { "0" };
-    let status = Command::new("/usr/bin/pmset")
-        .args(["-a", "lowpowermode", val])
-        .status();
+#[derive(Debug, Default, Clone, Copy)]
+struct UserLpmState {
+    battery_manual: bool,
+    ac_manual: bool,
+}
 
-    match status {
-        Ok(s) if s.success() => log!("Low Power Mode -> {val}"),
-        Ok(s) => log!("pmset exited with status: {s}"),
-        Err(e) => log!("Failed to invoke pmset: {e}"),
+fn query_user_lpm_state() -> UserLpmState {
+    let output = Command::new("/usr/bin/pmset")
+        .args(["-g", "custom"])
+        .output();
+
+    let mut state = UserLpmState::default();
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut current_section = "";
+
+        for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Battery Power:") {
+            current_section = "battery";
+        } else if trimmed.starts_with("AC Power:") {
+            current_section = "ac";
+        } else {
+            let mut tokens = trimmed.split_whitespace();
+            if tokens.next() == Some("lowpowermode") {
+                let is_one = tokens.next() == Some("1");
+                if current_section == "battery" {
+                    state.battery_manual = is_one;
+                } else if current_section == "ac" {
+                    state.ac_manual = is_one;
+                }
+            }
+        }
+    }
+    }
+    state
+}
+
+fn set_low_power_mode(enable: bool, user_state: &UserLpmState) {
+    let val = if enable { "1" } else { "0" };
+    // Only modify profiles where the user has NOT manually set Low Power Mode
+    let targets = [
+        (!user_state.battery_manual, "-b"),
+        (!user_state.ac_manual, "-c"),
+    ];
+
+    for (can_modify, flag) in targets {
+        if can_modify {
+            let status = Command::new("/usr/bin/pmset")
+                .args([flag, "lowpowermode", val])
+                .status();
+
+            match status {
+                Ok(s) if s.success() => log!("Low Power Mode ({flag}) -> {val}"),
+                Ok(s) => log!("pmset ({flag}) exited with status: {s}"),
+                Err(e) => log!("Failed to invoke pmset ({flag}): {e}"),
+            }
+        }
     }
 }
 
@@ -203,6 +251,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    let user_state = query_user_lpm_state();
+    let all_user_enabled = user_state.battery_manual && user_state.ac_manual;
+    if user_state.battery_manual || user_state.ac_manual {
+        log!(
+            "User Low Power Mode detected (Battery: {}, AC: {}). Only unconfigured profiles will be managed.",
+            user_state.battery_manual,
+            user_state.ac_manual
+        );
+    }
+
     let mut current_state: u64 = 0;
     unsafe { notify_get_state(token, &mut current_state) };
 
@@ -212,9 +270,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         describe_pressure_level(current_state)
     );
 
-    let mut lpm_active = current_state >= 1;
+    let mut lpm_active = (current_state >= 1) && !all_user_enabled;
     if lpm_active {
-        set_low_power_mode(true);
+        set_low_power_mode(true, &user_state);
     }
 
     let mut event = std::mem::MaybeUninit::<Kevent>::uninit();
@@ -258,7 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Cooldown timer expired: machine stayed at Level 0 for the required duration
         if ev.filter == EVFILT_TIMER {
             if lpm_active && current_state == 0 {
-                set_low_power_mode(false);
+                set_low_power_mode(false, &user_state);
                 lpm_active = false;
             }
             continue;
@@ -296,8 +354,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     unsafe { kevent(kq, &cancel_timer, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
 
-                    if !lpm_active {
-                        set_low_power_mode(true);
+                    if !lpm_active && !all_user_enabled {
+                        set_low_power_mode(true, &user_state);
                         lpm_active = true;
                     }
                 } else if new_state == 0 && lpm_active {
@@ -320,7 +378,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Guaranteed cleanup before exit
     if lpm_active {
-        set_low_power_mode(false);
+        set_low_power_mode(false, &user_state);
     }
 
     unsafe {
